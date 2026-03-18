@@ -5,6 +5,7 @@ import static com.google.common.truth.Truth.assertThat;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Bitmap.Config;
+import android.hardware.HardwareBuffer;
 import android.os.Build;
 import androidx.test.platform.app.InstrumentationRegistry;
 import java.io.IOException;
@@ -310,6 +311,57 @@ public class AvifDecoderTest {
     Bitmap bitmap = decoder.nthFrameHardwareBitmap(0, allowHdr);
     assertThat(bitmap).isNotNull();
     assertThat(bitmap.getConfig()).isEqualTo(Config.HARDWARE);
+    decoder.release();
+  }
+
+  // Tests caller-controlled HardwareBuffer decode for still images.
+  @Test
+  public void testDecodeIntoHardwareBuffer() throws IOException {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+      return;
+    }
+    if (image.isAnimated || config != Config.ARGB_8888) {
+      return;
+    }
+    ByteBuffer buffer = image.getBuffer();
+    AvifDecoder decoder = AvifDecoder.create(buffer, /* threads= */ 1);
+    assertThat(decoder).isNotNull();
+    HardwareBuffer hwb = decoder.createHardwareBuffer(/* allowHdr= */ false);
+    assertThat(hwb).isNotNull();
+    buffer.rewind();
+    assertThat(AvifDecoder.decodeIntoHardwareBuffer(buffer, buffer.remaining(),
+        /* threads= */ 1, hwb)).isTrue();
+    Bitmap bitmap = Bitmap.wrapHardwareBuffer(hwb, null);
+    assertThat(bitmap).isNotNull();
+    assertThat(bitmap.getConfig()).isEqualTo(Config.HARDWARE);
+    assertThat(bitmap.getWidth()).isEqualTo(image.width);
+    assertThat(bitmap.getHeight()).isEqualTo(image.height);
+    hwb.close();
+    decoder.release();
+  }
+
+  // Tests caller-controlled HardwareBuffer decode for animated images.
+  @Test
+  public void testAnimatedDecodeIntoHardwareBuffer() throws IOException {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+      return;
+    }
+    if (!image.isAnimated || config != Config.ARGB_8888) {
+      return;
+    }
+    ByteBuffer buffer = image.getBuffer();
+    AvifDecoder decoder = AvifDecoder.create(buffer, image.threads);
+    assertThat(decoder).isNotNull();
+    HardwareBuffer hwb = decoder.createHardwareBuffer(/* allowHdr= */ false);
+    assertThat(hwb).isNotNull();
+    Bitmap bitmap = Bitmap.wrapHardwareBuffer(hwb, null);
+    assertThat(bitmap).isNotNull();
+    assertThat(bitmap.getConfig()).isEqualTo(Config.HARDWARE);
+    for (int i = 0; i < image.frameCount; i++) {
+      assertThat(decoder.nextFrameIntoHardwareBuffer(hwb)).isTrue();
+    }
+    assertThat(decoder.nthFrameIntoHardwareBuffer(0, hwb)).isTrue();
+    hwb.close();
     decoder.release();
   }
 

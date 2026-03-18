@@ -4,6 +4,7 @@
 package org.aomedia.avif.android;
 
 import android.graphics.Bitmap;
+import android.hardware.HardwareBuffer;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
 import android.view.Display;
@@ -397,12 +398,89 @@ public class AvifDecoder {
     return nthFrameHardwareBitmap(n, /* allowHdr= */ false);
   }
 
+  /**
+   * Allocates a {@link HardwareBuffer} suitable for use with {@link #decodeIntoHardwareBuffer}
+   * or {@link #nextFrameIntoHardwareBuffer}. The buffer dimensions match this decoder's image
+   * dimensions. The format is R16G16B16A16_FLOAT for >8-bit images when {@code allowHdr} is true,
+   * falling back to R8G8B8A8_UNORM otherwise.
+   *
+   * <p>The caller is responsible for closing the buffer when done.
+   *
+   * @param allowHdr When true, prefer FP16 for >8-bit images.
+   * @return A new HardwareBuffer, or null on failure.
+   */
+  @RequiresApi(26)
+  @Nullable
+  public HardwareBuffer createHardwareBuffer(boolean allowHdr) {
+    if (Build.VERSION.SDK_INT < 26) return null;
+    return (HardwareBuffer) nativeCreateHardwareBuffer(width, height, depth, allowHdr);
+  }
+
+  /**
+   * Decodes a still AVIF image into a caller-provided {@link HardwareBuffer}.
+   *
+   * <p>The buffer dimensions must exactly match the decoded image dimensions. Use
+   * {@link #createHardwareBuffer} to allocate a compatible buffer.
+   *
+   * @param encoded The encoded AVIF image. encoded.position() must be 0.
+   * @param length Length of the encoded buffer.
+   * @param threads Number of decode threads.
+   * @param dest Destination HardwareBuffer. Must be pre-allocated with matching dimensions.
+   * @return true on success, false on failure.
+   */
+  @RequiresApi(26)
+  public static boolean decodeIntoHardwareBuffer(ByteBuffer encoded, int length, int threads,
+      HardwareBuffer dest) {
+    if (Build.VERSION.SDK_INT < 26) return false;
+    return nativeDecodeIntoHardwareBuffer(encoded, length, threads, dest);
+  }
+
+  /**
+   * Decodes the next frame of an animated AVIF into a caller-provided {@link HardwareBuffer}.
+   *
+   * <p>Reuses the same buffer across frames — a Bitmap wrapping it reflects new content without
+   * re-allocation. The buffer's format and dimensions must match the image.
+   *
+   * @param dest Destination HardwareBuffer (pre-allocated, matching dimensions).
+   * @return true on success, false on failure.
+   */
+  @RequiresApi(26)
+  public boolean nextFrameIntoHardwareBuffer(HardwareBuffer dest) {
+    if (Build.VERSION.SDK_INT < 26) return false;
+    return nativeNextFrameIntoHardwareBuffer(decoder, dest);
+  }
+
+  /**
+   * Decodes the nth frame of an animated AVIF into a caller-provided {@link HardwareBuffer}.
+   *
+   * <p>Subsequent calls to {@link #nextFrameIntoHardwareBuffer} will continue from frame n+1.
+   *
+   * @param n Zero-based frame index.
+   * @param dest Destination HardwareBuffer (pre-allocated, matching dimensions).
+   * @return true on success, false on failure.
+   */
+  @RequiresApi(26)
+  public boolean nthFrameIntoHardwareBuffer(int n, HardwareBuffer dest) {
+    if (Build.VERSION.SDK_INT < 26) return false;
+    return nativeNthFrameIntoHardwareBuffer(decoder, n, dest);
+  }
+
   private static native Object nativeDecodeHardwareBitmap(
       ByteBuffer encoded, int length, int threads, boolean allowHdr);
 
   private native Object nativeNextFrameHardwareBitmap(long decoder, boolean allowHdr);
 
   private native Object nativeNthFrameHardwareBitmap(long decoder, int n, boolean allowHdr);
+
+  private static native boolean nativeDecodeIntoHardwareBuffer(
+      ByteBuffer encoded, int length, int threads, Object dest);
+
+  private native boolean nativeNextFrameIntoHardwareBuffer(long decoder, Object dest);
+
+  private native boolean nativeNthFrameIntoHardwareBuffer(long decoder, int n, Object dest);
+
+  private native Object nativeCreateHardwareBuffer(
+      int width, int height, int depth, boolean allowHdr);
 
   private native long createDecoder(ByteBuffer encoded, int length, int threads);
 

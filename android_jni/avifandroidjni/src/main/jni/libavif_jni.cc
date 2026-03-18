@@ -455,6 +455,105 @@ jobject AvifImageToHardwareBitmap(JNIEnv* env, AvifDecoderWrapper* decoder,
   return bitmap;
 }
 
+bool AvifImageToExistingHardwareBuffer(JNIEnv* env,
+                                       AvifDecoderWrapper* decoder,
+                                       jobject java_hwb) {
+  if (android_get_device_api_level() < 26) return false;
+
+  // AHardwareBuffer_fromHardwareBuffer returns a borrowed pointer; the Java
+  // HardwareBuffer retains ownership. Do not call AHardwareBuffer_release on
+  // the returned pointer.
+  AHardwareBuffer* ahb = AHardwareBuffer_fromHardwareBuffer(env, java_hwb);
+  if (ahb == nullptr) return false;
+
+  std::unique_ptr<avifImage, decltype(&avifImageDestroy)> cropped_image(
+      nullptr, avifImageDestroy);
+  avifImage* image = ApplyCrop(decoder, cropped_image);
+  if (image == nullptr) return false;
+
+  AHardwareBuffer_Desc desc;
+  AHardwareBuffer_describe(ahb, &desc);
+
+  if (desc.width != image->width || desc.height != image->height) {
+    LOGE("AvifImageToExistingHardwareBuffer: buffer %ux%u != image %ux%u",
+         desc.width, desc.height, image->width, image->height);
+    return false;
+  }
+
+  void* pixels = nullptr;
+  if (AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1,
+                           nullptr, &pixels) != 0 ||
+      pixels == nullptr) {
+    return false;
+  }
+
+  avifRGBImage rgb;
+  avifRGBImageSetDefaults(&rgb, image);
+  rgb.alphaPremultiplied = AVIF_TRUE;
+  rgb.pixels = static_cast<uint8_t*>(pixels);
+
+  bool ok = false;
+  switch (desc.format) {
+    case AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM:
+      rgb.format = AVIF_RGB_FORMAT_RGBA;
+      rgb.depth = 8;
+      rgb.isFloat = AVIF_FALSE;
+      rgb.rowBytes = desc.stride * 4;
+      ok = avifImageYUVToRGB(image, &rgb) == AVIF_RESULT_OK;
+      break;
+    case AHARDWAREBUFFER_FORMAT_R16G16B16A16_FLOAT:
+      rgb.format = AVIF_RGB_FORMAT_RGBA;
+      rgb.depth = 16;
+      rgb.isFloat = AVIF_TRUE;
+      rgb.rowBytes = desc.stride * 8;
+      ok = avifImageYUVToRGB(image, &rgb) == AVIF_RESULT_OK;
+      break;
+    default:
+      LOGE("AvifImageToExistingHardwareBuffer: unsupported format 0x%x",
+           desc.format);
+      break;
+  }
+
+  AHardwareBuffer_unlock(ahb, nullptr);
+  return ok;
+}
+
+jobject CreateHardwareBufferForImage(JNIEnv* env, int width, int height,
+                                     int depth, bool allow_hdr) {
+  if (android_get_device_api_level() < 26) return nullptr;
+
+  const uint64_t usage = AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN |
+                         AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+
+  auto try_alloc = [&](uint32_t format) -> AHardwareBuffer* {
+    AHardwareBuffer_Desc desc = {};
+    desc.width = static_cast<uint32_t>(width);
+    desc.height = static_cast<uint32_t>(height);
+    desc.layers = 1;
+    desc.format = format;
+    desc.usage = usage;
+    if (android_get_device_api_level() >= 29 &&
+        !AHardwareBuffer_isSupported(&desc)) {
+      return nullptr;
+    }
+    AHardwareBuffer* hwb = nullptr;
+    return (AHardwareBuffer_allocate(&desc, &hwb) == 0) ? hwb : nullptr;
+  };
+
+  AHardwareBuffer* hwb = nullptr;
+  if (allow_hdr && depth > 8) {
+    hwb = try_alloc(AHARDWAREBUFFER_FORMAT_R16G16B16A16_FLOAT);
+  }
+  if (hwb == nullptr) {
+    hwb = try_alloc(AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
+  }
+  if (hwb == nullptr) return nullptr;
+
+  jobject java_hwb = AHardwareBuffer_toHardwareBuffer(env, hwb);
+  AHardwareBuffer_release(hwb);
+  return java_hwb;
+}
+
 }  // namespace
 
 jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
@@ -686,4 +785,53 @@ FUNC(jobject, nativeNthFrameHardwareBitmap, jlong jdecoder, jint n,
   return AvifImageToHardwareBitmap(env, decoder, allow_hdr);
 }
 
+FUNC(jboolean, nativeDecodeIntoHardwareBuffer, jobject encoded, jint length,
+     jint threads, jobject java_hwb) {
+  IGNORE_UNUSED_JNI_PARAMETERS;
+  const uint8_t* const buffer =
+      static_cast<const uint8_t*>(env->GetDirectBufferAddress(encoded));
+  AvifDecoderWrapper decoder;
+  if (!CreateDecoderAndParse(&decoder, buffer, length,
+                             getThreadCount(threads))) {
+    return false;
+  }
+  avifResult res = avifDecoderNextImage(decoder.decoder);
+  if (res != AVIF_RESULT_OK) {
+    LOGE("nativeDecodeIntoHardwareBuffer: decode failed %d", res);
+    return false;
+  }
+  return AvifImageToExistingHardwareBuffer(env, &decoder, java_hwb);
+}
+
+FUNC(jboolean, nativeNextFrameIntoHardwareBuffer, jlong jdecoder,
+     jobject java_hwb) {
+  IGNORE_UNUSED_JNI_PARAMETERS;
+  AvifDecoderWrapper* const decoder =
+      reinterpret_cast<AvifDecoderWrapper*>(jdecoder);
+  avifResult res = avifDecoderNextImage(decoder->decoder);
+  if (res != AVIF_RESULT_OK) {
+    LOGE("nativeNextFrameIntoHardwareBuffer: decode failed %d", res);
+    return false;
+  }
+  return AvifImageToExistingHardwareBuffer(env, decoder, java_hwb);
+}
+
+FUNC(jboolean, nativeNthFrameIntoHardwareBuffer, jlong jdecoder, jint n,
+     jobject java_hwb) {
+  IGNORE_UNUSED_JNI_PARAMETERS;
+  AvifDecoderWrapper* const decoder =
+      reinterpret_cast<AvifDecoderWrapper*>(jdecoder);
+  avifResult res = avifDecoderNthImage(decoder->decoder, n);
+  if (res != AVIF_RESULT_OK) {
+    LOGE("nativeNthFrameIntoHardwareBuffer: decode failed %d", res);
+    return false;
+  }
+  return AvifImageToExistingHardwareBuffer(env, decoder, java_hwb);
+}
+
+FUNC(jobject, nativeCreateHardwareBuffer, jint width, jint height, jint depth,
+     jboolean allow_hdr) {
+  IGNORE_UNUSED_JNI_PARAMETERS;
+  return CreateHardwareBufferForImage(env, width, height, depth, allow_hdr);
+}
 
