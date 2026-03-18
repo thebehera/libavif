@@ -4,7 +4,11 @@
 package org.aomedia.avif.android;
 
 import android.graphics.Bitmap;
+import android.hardware.display.DisplayManager;
+import android.os.Build;
+import android.view.Display;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 import java.nio.ByteBuffer;
 
 /**
@@ -252,6 +256,153 @@ public class AvifDecoder {
    * libyuv version (if available).
    */
   public static native String versionString();
+
+  /**
+   * Returns true if {@code display} supports high bit-depth (HDR) rendering.
+   *
+   * <p>Pass the result to {@link #decodeHardwareBitmap(ByteBuffer, int, int, boolean)} as
+   * {@code allowHdr}: on SDR displays this avoids allocating an FP16 buffer; on HDR displays it
+   * preserves the full colour range of >8-bit AVIF images.
+   *
+   * <p>Requires API 24; always returns false on older devices.
+   *
+   * @param display The display to query (typically {@code WindowManager.getDefaultDisplay()} or
+   *     a display obtained from {@link DisplayManager}).
+   * @return true if the display can render HDR content.
+   */
+  @RequiresApi(24)
+  public static boolean isHighBitDepthDisplaySupported(Display display) {
+    if (Build.VERSION.SDK_INT < 24) return false;
+    if (Build.VERSION.SDK_INT >= 26 && display.isWideColorGamut()) return true;
+    Display.HdrCapabilities caps = display.getHdrCapabilities();
+    return caps != null && caps.getSupportedHdrTypes().length > 0;
+  }
+
+  /**
+   * Decodes a still AVIF image and returns a hardware-backed {@link Bitmap} (Config.HARDWARE).
+   *
+   * <p>The returned Bitmap is GPU-resident and cannot be modified. Returns null if the device does
+   * not support AHardwareBuffer (API < 26) or if the decode fails.
+   *
+   * @param encoded The encoded AVIF image. encoded.position() must be 0.
+   * @param length Length of the encoded buffer.
+   * @param threads Number of decode threads (0 = library default, negative = CPU core count).
+   * @param allowHdr When true and the image has depth > 8, an R16G16B16A16_FLOAT (FP16) buffer is
+   *     used to preserve HDR precision. When false, R8G8B8A8_UNORM is always used (SDR). Use
+   *     {@link #isHighBitDepthDisplaySupported} to determine the right value.
+   * @return A hardware-backed Bitmap on success, null on failure.
+   */
+  @RequiresApi(26)
+  @Nullable
+  public static Bitmap decodeHardwareBitmap(ByteBuffer encoded, int length, int threads,
+      boolean allowHdr) {
+    if (Build.VERSION.SDK_INT < 26) {
+      return null;
+    }
+    return (Bitmap) nativeDecodeHardwareBitmap(encoded, length, threads, allowHdr);
+  }
+
+  /**
+   * Decodes a still AVIF image and returns a hardware-backed {@link Bitmap} (Config.HARDWARE).
+   *
+   * <p>The returned Bitmap is GPU-resident and cannot be modified. Returns null if the device does
+   * not support AHardwareBuffer (API < 26) or if the decode fails.
+   *
+   * <p>Always uses R8G8B8A8_UNORM (SDR). For HDR-aware decoding, use
+   * {@link #decodeHardwareBitmap(ByteBuffer, int, int, boolean)}.
+   *
+   * @param encoded The encoded AVIF image. encoded.position() must be 0.
+   * @param length Length of the encoded buffer.
+   * @param threads Number of decode threads (0 = library default, negative = CPU core count).
+   * @return A hardware-backed Bitmap on success, null on failure.
+   */
+  @RequiresApi(26)
+  @Nullable
+  public static Bitmap decodeHardwareBitmap(ByteBuffer encoded, int length, int threads) {
+    return decodeHardwareBitmap(encoded, length, threads, /* allowHdr= */ false);
+  }
+
+  /**
+   * Decodes a still AVIF image and returns a hardware-backed {@link Bitmap} (Config.HARDWARE).
+   *
+   * <p>Uses a single decode thread and R8G8B8A8_UNORM (SDR). Returns null on failure.
+   *
+   * @param encoded The encoded AVIF image. encoded.position() must be 0.
+   * @param length Length of the encoded buffer.
+   * @return A hardware-backed Bitmap on success, null on failure.
+   */
+  @RequiresApi(26)
+  @Nullable
+  public static Bitmap decodeHardwareBitmap(ByteBuffer encoded, int length) {
+    return decodeHardwareBitmap(encoded, length, /* threads= */ 1, /* allowHdr= */ false);
+  }
+
+  /**
+   * Decodes the next frame of an animated AVIF and returns a hardware-backed {@link Bitmap}.
+   *
+   * @param allowHdr When true and the image has depth > 8, FP16 is used. See
+   *     {@link #decodeHardwareBitmap(ByteBuffer, int, int, boolean)}.
+   * @return A hardware-backed Bitmap on success, null on failure.
+   */
+  @RequiresApi(26)
+  @Nullable
+  public Bitmap nextFrameHardwareBitmap(boolean allowHdr) {
+    if (Build.VERSION.SDK_INT < 26) {
+      return null;
+    }
+    return (Bitmap) nativeNextFrameHardwareBitmap(decoder, allowHdr);
+  }
+
+  /**
+   * Decodes the next frame of an animated AVIF and returns a hardware-backed {@link Bitmap}.
+   *
+   * <p>Uses R8G8B8A8_UNORM (SDR). Returns null on failure.
+   *
+   * @return A hardware-backed Bitmap on success, null on failure.
+   */
+  @RequiresApi(26)
+  @Nullable
+  public Bitmap nextFrameHardwareBitmap() {
+    return nextFrameHardwareBitmap(/* allowHdr= */ false);
+  }
+
+  /**
+   * Decodes the nth frame of an animated AVIF and returns a hardware-backed {@link Bitmap}.
+   *
+   * @param n The zero-based index of the frame to decode.
+   * @param allowHdr When true and the image has depth > 8, FP16 is used. See
+   *     {@link #decodeHardwareBitmap(ByteBuffer, int, int, boolean)}.
+   * @return A hardware-backed Bitmap on success, null on failure.
+   */
+  @RequiresApi(26)
+  @Nullable
+  public Bitmap nthFrameHardwareBitmap(int n, boolean allowHdr) {
+    if (Build.VERSION.SDK_INT < 26) {
+      return null;
+    }
+    return (Bitmap) nativeNthFrameHardwareBitmap(decoder, n, allowHdr);
+  }
+
+  /**
+   * Decodes the nth frame of an animated AVIF and returns a hardware-backed {@link Bitmap}.
+   *
+   * <p>Uses R8G8B8A8_UNORM (SDR). Returns null on failure.
+   *
+   * @param n The zero-based index of the frame to decode.
+   * @return A hardware-backed Bitmap on success, null on failure.
+   */
+  @RequiresApi(26)
+  @Nullable
+  public Bitmap nthFrameHardwareBitmap(int n) {
+    return nthFrameHardwareBitmap(n, /* allowHdr= */ false);
+  }
+
+  private static native Object nativeDecodeHardwareBitmap(
+      ByteBuffer encoded, int length, int threads, boolean allowHdr);
+
+  private native Object nativeNextFrameHardwareBitmap(long decoder, boolean allowHdr);
+
+  private native Object nativeNthFrameHardwareBitmap(long decoder, int n, boolean allowHdr);
 
   private native long createDecoder(ByteBuffer encoded, int length, int threads);
 
